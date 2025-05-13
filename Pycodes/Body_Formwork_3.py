@@ -1,6 +1,6 @@
 import rhinoscriptsyntax as rs
 import Rhino
-import System.IO
+import Rhino.Geometry as rg
 
 class MeshProcessor:
     """
@@ -50,25 +50,74 @@ class MeshProcessor:
     def align_mesh_to_xy_plane(self):
         """
         Aligns the mesh to the XY plane and moves it to the target Z coordinate.
+        Creates additional meshes perpendicular to the aligned mesh at its four edges.
         """
         new_mesh_id = rs.CopyObject(self.mesh_id)
         mesh_geo = rs.coercemesh(self.mesh_id)
-        point_1_3d = Rhino.Geometry.Point3d(self.origin[0], self.origin[1], self.origin[2])
+        point_1_3d = rg.Point3d(self.origin[0], self.origin[1], self.origin[2])
         mesh_point = mesh_geo.ClosestMeshPoint(point_1_3d, 0.0)
         normal = mesh_geo.NormalAt(mesh_point)
         target_z = self.offset_lowest[2] + 0.2
-        target_plane = Rhino.Geometry.Plane(Rhino.Geometry.Point3d(self.origin[0], self.origin[1], target_z),
-                                            Rhino.Geometry.Vector3d(0, 0, 1))
-        source_plane = Rhino.Geometry.Plane(point_1_3d, normal)
-        rs.OrientObject(new_mesh_id, 
-                        [source_plane.Origin, source_plane.Origin + source_plane.Normal],
+        target_plane = rg.Plane(rg.Point3d(self.origin[0], self.origin[1], target_z), rg.Vector3d(0, 0, 1))
+        source_plane = rg.Plane(point_1_3d, normal)
+        rs.OrientObject(new_mesh_id, [source_plane.Origin, source_plane.Origin + source_plane.Normal],
                         [target_plane.Origin, target_plane.Origin + target_plane.Normal])
-        new_vertices = rs.MeshVertices(new_mesh_id)
-        new_lowest_z = min(v[2] for v in new_vertices)
+        mesh_object = Rhino.RhinoDoc.ActiveDoc.Objects.Find(new_mesh_id)
+        mesh = mesh_object.Geometry.ToMesh()
+        new_vertices = mesh.Vertices
+        new_lowest_z = min(v.Z for v in new_vertices)
         translation = (0, 0, target_z - new_lowest_z)
         rs.MoveObject(new_mesh_id, translation)
         self.mesh_id = new_mesh_id
-        print("New Mesh lowest Z: {:.2f} (should be {:.2f})".format(min(v[2] for v in rs.MeshVertices(new_mesh_id)), target_z))
+        print("New Mesh lowest Z: {:.2f} (should be {:.2f})".format(min(v.Z for v in mesh.Vertices), target_z))
+
+        # Create perpendicular meshes at the four edges
+        self.create_perpendicular_meshes(target_z, 0.055)  # Height of 55mm (0.055 meters)
+
+    def create_perpendicular_meshes(self, base_z, height):
+        """
+        Creates four meshes perpendicular to the aligned mesh at its edges.
+        """
+        mesh_object = Rhino.RhinoDoc.ActiveDoc.Objects.Find(self.mesh_id)
+        mesh = mesh_object.Geometry.ToMesh()
+        if not mesh:
+            print("Could not retrieve vertices from Mesh!")
+            return
+
+        min_x = min(v.X for v in mesh.Vertices)
+        max_x = max(v.X for v in mesh.Vertices)
+        min_y = min(v.Y for v in mesh.Vertices)
+        max_y = max(v.Y for v in mesh.Vertices)
+
+        # Define the four corner points
+        corners = [
+            (min_x, min_y, base_z),
+            (max_x, min_y, base_z),
+            (max_x, max_y, base_z),
+            (min_x, max_y, base_z)
+        ]
+
+        # Create four perpendicular meshes
+        for i in range(4):
+            corner1 = corners[i]
+            corner2 = corners[(i + 1) % 4]  # Next corner
+            mesh_vertices = [
+                rg.Point3d(corner1[0], corner1[1], corner1[2]),
+                rg.Point3d(corner2[0], corner2[1], corner2[2]),
+                rg.Point3d(corner2[0], corner2[1], base_z + height),
+                rg.Point3d(corner1[0], corner1[1], base_z + height)
+            ]
+            mesh_faces = [(0, 1, 2, 3)]
+            perpendicular_mesh = rg.Mesh()
+            perpendicular_mesh.Vertices.AddVertices(mesh_vertices)
+            perpendicular_mesh.Faces.AddFaces(mesh_faces)
+            perpendicular_mesh.Normals.ComputeNormals()
+            perpendicular_mesh.Compact()
+            mesh_id = Rhino.RhinoDoc.ActiveDoc.Objects.AddMesh(perpendicular_mesh)
+            if mesh_id != Rhino.Geometry.Guid.Empty: # Check for valid GUID
+                rs.ObjectName( (mesh_id, "Perpendicular Mesh "+ {i + 1}))
+            else:
+                print("Failed to create perpendicular mesh ")
 
     def quad_remesh_mesh(self):
         """
@@ -185,38 +234,6 @@ class MeshProcessor:
         
         print("Geometry and labels created for point relative to plane.")
 
-# tinh nang mo rong khac
-    def export_mesh(self):
-        """
-        Exports the mesh to a file.
-        """
-        file_path = rs.SaveFileName("Export Mesh", "OBJ Files (*.obj)|*.obj|STL Files (*.stl)|*.stl||")
-        if not file_path:
-            return
-
-        mesh = rs.coercemesh(self.mesh_id)
-        if not mesh:
-            print("Invalid mesh.")
-            return
-
-        file_extension = System.IO.Path.GetExtension(file_path).lower()
-        if file_extension == ".obj":
-            #mesh.Write(file_path, rg.MeshWriteTopology.WriteOnlyQuads)
-            write_options = Rhino.FileIO.FileWriteOptions()
-            write_options.WriteSelectedObjectsOnly = False 
-            obj_options = Rhino.FileIO.FileObjWriteOptions(write_options)
-            obj_options.UseSimpleDialog = True
-            rc = Rhino.FileIO.FileObj.Write(file_path, scriptcontext.doc, obj_options)
-            #Rhino.FileIO.FileObj(file_path,mesh,Rhino.FileIO.FileObjWriteOptions)
-            print("Mesh exported to OBJ.")
-        elif file_extension == ".stl":            
-            #mesh.Write(file_path, rg.MeshWriteTopology.WriteOnlyTriangles)
-            Rhino.FileIO.filestl (file_path,mesh,rg.MeshWriteTopology.WriteOnlyQuads)
-            print("Mesh exported to STL.")
-        else:
-            print("Unsupported file format.")
-
-
 # Main execution
 if __name__ == "__main__":
     rs.EnableRedraw(False)
@@ -231,7 +248,6 @@ if __name__ == "__main__":
             mesh_processor.quad_remesh_mesh()
             mesh_processor.create_geometry_and_labels()
             mesh_processor.create_solid_from_mesh()
-            #mesh_processor.export_mesh() # export
     
     rs.EnableRedraw(True)
     
